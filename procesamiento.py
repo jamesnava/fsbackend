@@ -5,6 +5,7 @@ import numpy as np
 import httpx
 import re
 from fastapi import HTTPException
+from database import execute_query
 
 
 async def leerImage(ruta_archivo:str):
@@ -17,17 +18,17 @@ async def leerImage(ruta_archivo:str):
 				respuesta=await cliente.post("https://api.ocr.space/parse/image",data=datos,files=archivos)
 				resultado_json=respuesta.json()
 	except httpx.ReadTimeout:
-		raise HTTPException(status_code=504,detail="ORC API no respondio a tiempo")
+		return HTTPException(status_code=504,detail={"detail":"ORC API no respondio a tiempo"})
 	except Exception as e:
-		raise HTTPException(status_code=500,detail=f"error inesperado: {str(e)}")
+		return HTTPException(status_code=500,detail={"detail":f"error inesperado: {str(e)}"})
 
 	if "ParsedResults" not in resultado_json:
-		raise HTTPException(status_code=400,detail=resultado_json.get("ErrorMessage","Error en OCR"))
+		return JSONResponse(status_code=400, content={"detail": resultado_json.get("ErrorMessage", "Error en OCR")})
 		
 	texto_extraido=resultado_json["ParsedResults"][0]["ParsedText"]
-	final=ObtencionCodigo(texto_extraido)
-	print(final)
-	return {"texto":texto_extraido}
+	final_texto=ObtencionCodigo(texto_extraido)
+
+	return {"texto":texto_extraido,'valido':final_texto}
 
 
 async def preprocesamiento(img,roi):
@@ -37,33 +38,61 @@ async def preprocesamiento(img,roi):
 	x2 = int((roi["x"] + roi["w"]) * w)
 	y2 = int((roi["y"] + roi["h"]) * h)	
 	recorte = img[y1:y2, x1:x2]
-	imagen_escalada = cv2.resize(recorte, None, fx=0.6, fy=0.6, interpolation=cv2.INTER_LINEAR)
-	gray_image=cv2.cvtColor(imagen_escalada,cv2.COLOR_BGR2GRAY)
 	#borrado
-	bor_image=processImage(gray_image)
+	bor_image=processImage(recorte)
+
 	ruta="gray_image.png"	
 	cv2.imwrite(ruta,bor_image)
 	resultado=await leerImage(ruta)
 	return resultado
 
 def processImage(img):
-	gray_blur = cv2.bilateralFilter(img, 9, 75, 75)
-	#gray_blur=cv2.medianBlur(img,3)
-	_,binary_adapt=cv2.threshold(gray_blur,0,255,cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
-	#kernel=np.ones((3,3),np.uint8)
-	#opening=cv2.morphologyEx(binary_adapt,cv2.MORPH_OPEN,kernel)
-	return binary_adapt
+
+	imagen_escalada = cv2.resize(img, None, fx=0.6, fy=0.6, interpolation=cv2.INTER_LINEAR)
+	
+	gray_image=cv2.cvtColor(imagen_escalada,cv2.COLOR_BGR2GRAY)
+
+	clahe=cv2.createCLAHE(clipLimit=2.0,tileGridSize=(8,8))
+	gris=clahe.apply(gray_image)
+
+	kernel = cv2.getStructuringElement(cv2.MORPH_RECT,(31,31))
+	tophat = cv2.morphologyEx(gris,cv2.MORPH_TOPHAT,kernel)	
+	return tophat
 
 def ObtencionCodigo(texto):
-	patronMStatus=r"M-Status:\s*(\w+)"
-	patronSData=r"S-Data\s*\(Hex\):\s*([\w]+)"
-	patronMData=r"M-Data\s*\(Hex\):\s*([\w ]+)"
-	patronTCode=r"T-Code:\s*(\d+)"
+	patronSData=r"S-Data\s*(?:\(Hex\))?[:;.]?\s*\r?\n([^\r\n]+)"
+	patronMStatus=r"M-Status[:.]*\s*([0-9]+)"
+	patronMData=r"M-Data\s*(?:\(Hex\))?:?\s*\r?\n([^\r\n]+)"
+	patronTCode=r"T-Code[:.;]*\s*([0-9]+)"
 	patrones={"m_status":patronMStatus,"s_data":patronSData,
-	"s_data":patronMData,"t_code":patronTCode}
+	"m_data":patronMData,"t_code":patronTCode}
 	resultados={}
 	for nombre,patron in patrones.items():
 		coincidencia=re.search(patron,texto)
 		if coincidencia:
 			resultados[nombre]=coincidencia.group(1).strip()
+	
+	# Si se capturó m_data con patrón "xx yy aa cc", generar 4 consultas SQL
+	if "m_data" in resultados:
+		mdata_value = resultados["m_data"]
+		partes = mdata_value.split()
+		
+		print(partes)
+		#consultas = []
+		#if len(partes) >= 1:
+		#	# Cambia "tabla1" y "campo1" por tus nombres reales
+		#	q1 = f"SELECT * FROM tb_b0 WHERE campo1 = '{partes[0]}'"
+		#	consultas.append(q1)
+		#if len(partes) >= 2:
+		#	q2 = f"SELECT * FROM tabla2 WHERE campo2 = '{partes[1]}'"
+		#	consultas.append(q2)
+		#if len(partes) >= 3:
+		#	q3 = f"SELECT * FROM tabla3 WHERE campo3 = '{partes[2]}'"
+		#	consultas.append(q3)
+		#if len(partes) >= 4:
+		#	q4 = f"SELECT * FROM tabla4 WHERE campo4 = '{partes[3]}'"
+		#	consultas.append(q4)
+		
+		resultados["consultas_sql"] = consultas
+	
 	return resultados
